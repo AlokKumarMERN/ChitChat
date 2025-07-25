@@ -1,21 +1,25 @@
 #include <iostream>
 #include <string>
 #include <queue>
-#include <stack>
-#include <algorithm>
 #include <vector>
-#include <limits>   // Required for numeric_limits
+#include <limits>
+#include <algorithm>
 #include <cstdlib>
 
 using namespace std;
 
 // -- 1. Core Data Structures --
+enum MessageStatus {
+    SENT,
+    DELIVERED,
+    SEEN
+};
 
 struct Message {
     string sender;
     string receiver;
     string content;
-    bool isDelivered = false; // NEW: To track delivery status
+    MessageStatus status = SENT;
     Message* next = nullptr;
 };
 
@@ -30,7 +34,6 @@ struct User {
 };
 
 // -- 2. Helper Functions --
-
 void clearScreen() {
 #ifdef _WIN32
     system("cls");
@@ -39,21 +42,18 @@ void clearScreen() {
 #endif
 }
 
-// NEW: A robust function to get numeric input safely
 int getNumericInput() {
     int value;
     while (!(cin >> value)) {
         cout << "Invalid input. Please enter a valid number: ";
-        cin.clear(); // Clear the error flag on cin
-        cin.ignore(numeric_limits<streamsize>::max(), '\n'); // Discard the bad input
+        cin.clear();
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');
     }
-    cin.ignore(numeric_limits<streamsize>::max(), '\n'); // Discard the rest of the line
+    cin.ignore(numeric_limits<streamsize>::max(), '\n');
     return value;
 }
 
-
 // -- 3. Manager Classes --
-
 class UserManager {
 private:
     User* userListHead = nullptr;
@@ -70,7 +70,7 @@ public:
         User* currentUser = userListHead;
         while (currentUser != nullptr) {
             User* nextUser = currentUser->next;
-            // Message memory is now handled by MessageSystem, so we just delete the user
+            // Memory for Message objects is now handled solely by MessageSystem
             delete currentUser;
             currentUser = nextUser;
         }
@@ -118,67 +118,74 @@ public:
 class MessageSystem {
 private:
     queue<Message*> messageDeliveryQueue;
-    vector<Message*> allMessages; // MODIFIED: Central store for all messages to manage memory
+    vector<Message*> allMessages; // The central store for all messages
 
 public:
-     ~MessageSystem() {
-        // Now, this destructor is responsible for all message memory
+    ~MessageSystem() {
         for (Message* msg : allMessages) {
             delete msg;
         }
     }
 
-    // MODIFIED: Now creates one shared message object
+    // MODIFIED: Now creates ONE shared message object
     void sendMessage(User* sender, User* receiver, const string& text) {
         if (!sender || !receiver) return;
 
-        // Create ONE message object
-        Message* msg = new Message{sender->username, receiver->username, text};
+        Message* shared_msg = new Message{sender->username, receiver->username, text};
+        allMessages.push_back(shared_msg);
 
-        allMessages.push_back(msg); // Add to central store for memory management
+        messageDeliveryQueue.push(shared_msg);
 
-        messageDeliveryQueue.push(msg); // Add pointer to delivery queue
+        shared_msg->next = sender->outboxHead;
+        sender->outboxHead = shared_msg;
 
-        // Add the SAME pointer to the sender's outbox
-        msg->next = sender->outboxHead;
-        sender->outboxHead = msg;
-
-        cout << "\nMessage sent to " << receiver->username << " and is pending delivery." << endl;
+        cout << "\nMessage sent to " << receiver->username << "." << endl;
     }
 
-    // MODIFIED: Now updates the status of the shared message
+    // MODIFIED: Updates the status of the shared message
     void processDeliveries(UserManager& userManager) {
-        if (messageDeliveryQueue.empty()) {
-            return;
-        }
         while (!messageDeliveryQueue.empty()) {
             Message* msgToDeliver = messageDeliveryQueue.front();
             messageDeliveryQueue.pop();
             User* receiver = userManager.findUser(msgToDeliver->receiver);
             if (receiver) {
-                // We're adding the same message object, not a copy
+                msgToDeliver->status = DELIVERED;
                 msgToDeliver->next = receiver->inboxHead;
                 receiver->inboxHead = msgToDeliver;
-                msgToDeliver->isDelivered = true; // Update status to Delivered
             }
-            // No need to delete if receiver not found, memory is handled by destructor
         }
     }
 
-    // MODIFIED: Now shows delivery status
-    void displayConversationHistory(User* user) {
+    // MODIFIED: Now updates status to SEEN and displays the correct status string
+    void displayConversationHistory(User* user, UserManager& userManager) {
+        processDeliveries(userManager);
+
         cout << "\n--- Full Conversation History for " << user->username << " ---" << endl;
+
+        Message* inboxCurrent = user->inboxHead;
+        while (inboxCurrent) {
+            if (inboxCurrent->status == DELIVERED) {
+                inboxCurrent->status = SEEN;
+            }
+            inboxCurrent = inboxCurrent->next;
+        }
 
         cout << "\n--- Messages You Sent (Outbox) ---" << endl;
         if (!user->outboxHead) {
             cout << "Outbox is empty." << endl;
         } else {
-            Message* current = user->outboxHead;
-            while (current) {
-                cout << "To: " << current->receiver << " | "
-                     << "Status: " << (current->isDelivered ? "(Delivered)" : "(Pending)  ")
-                     << " | Message: " << current->content << endl;
-                current = current->next;
+            Message* outboxCurrent = user->outboxHead;
+            while (outboxCurrent) {
+                string statusText;
+                switch (outboxCurrent->status) {
+                    case SENT:      statusText = "(Sent)";      break;
+                    case DELIVERED: statusText = "(Delivered)"; break;
+                    case SEEN:      statusText = "(Seen)";      break;
+                }
+                cout << "To: " << outboxCurrent->receiver << " | "
+                     << "Status: " << statusText
+                     << " | Message: " << outboxCurrent->content << endl;
+                outboxCurrent = outboxCurrent->next;
             }
         }
 
@@ -186,10 +193,10 @@ public:
         if (!user->inboxHead) {
             cout << "Inbox is empty." << endl;
         } else {
-            Message* current = user->inboxHead;
-            while (current) {
-                cout << "From: " << current->sender << " | Message: " << current->content << endl;
-                current = current->next;
+            inboxCurrent = user->inboxHead;
+            while (inboxCurrent) {
+                cout << "From: " << inboxCurrent->sender << " | Message: " << inboxCurrent->content << endl;
+                inboxCurrent = inboxCurrent->next;
             }
         }
         cout << "\n---------------------------------------------\n";
@@ -197,7 +204,6 @@ public:
 };
 
 // -- 4. Main Application UI and Logic --
-
 void showLoggedInMenu(const string& username) {
     cout << "\n--- Logged in as " << username << " ---" << endl;
     cout << "1. Send a Message" << endl;
@@ -224,8 +230,7 @@ int main() {
     while (true) {
         if (currentUser == nullptr) {
             showMainMenu();
-            choice = getNumericInput(); // MODIFIED: Using safe input function
-
+            choice = getNumericInput();
             if (choice == 1) {
                 string username, password;
                 cout << "Enter username: ";
@@ -248,7 +253,6 @@ int main() {
                 getline(cin, password);
                 cout << "Confirm your password: ";
                 getline(cin, confirmPassword);
-
                 if (password != confirmPassword) {
                     cout << "\nError: Passwords do not match." << endl;
                 } else {
@@ -264,10 +268,9 @@ int main() {
             } else {
                 cout << "\nInvalid choice. Please enter 1, 2, or 0." << endl;
             }
-        } else { // User is logged in
+        } else {
             showLoggedInMenu(currentUser->username);
-            choice = getNumericInput(); // MODIFIED: Using safe input function
-
+            choice = getNumericInput();
             switch (choice) {
                 case 1: {
                     string receiverName, messageText;
@@ -286,8 +289,7 @@ int main() {
                     break;
                 }
                 case 2:
-                    messageSystem.processDeliveries(userManager);
-                    messageSystem.displayConversationHistory(currentUser);
+                    messageSystem.displayConversationHistory(currentUser, userManager);
                     break;
                 case 9:
                     cout << "\nLogging out " << currentUser->username << "..." << endl;
@@ -300,7 +302,6 @@ int main() {
             }
         }
     }
-
     cout << "\nExiting application. Goodbye!" << endl;
     return 0;
 }
